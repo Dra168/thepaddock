@@ -103,11 +103,17 @@ def fetch_all_pages(fn, **kwargs):
     """
     resp = fn(limit=PAGE_SIZE, **kwargs)
     frames = list(resp.content)
-    guard = 0
-    while not resp.is_complete and guard < 20:
-        resp = resp.get_next_result_page()
+
+    # Don't use `is_complete` to drive this loop: it returns False for any page
+    # with a non-zero offset, so it stays False forever once you've paged once.
+    # `get_next_result_page` applies the correct test (offset + limit >= total)
+    # and raises ValueError when there is nothing left, so let it be the signal.
+    for _ in range(20):
+        try:
+            resp = resp.get_next_result_page()
+        except ValueError:
+            break
         frames.extend(resp.content)
-        guard += 1
     frames = [f for f in frames if f is not None and len(f)]
     if not frames:
         return pd.DataFrame()
@@ -130,7 +136,7 @@ def find_recent_race(ergast, lookback_hours=LOOKBACK_HOURS):
 
     for year in (now.year, now.year - 1):
         try:
-            schedule = ergast.get_race_schedule(season=year)
+            schedule = ergast.get_race_schedule(season=year, limit=100)
         except Exception as exc:
             print(f"could not load {year} schedule: {exc}")
             continue
