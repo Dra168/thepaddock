@@ -1,0 +1,17 @@
+name: OpenF1 Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Can the runner reach OpenF1
+        run: |
+          echo "--- status code ---"
+          curl -s -o body.json -w "HTTP %{http_code}\n" \
+            "https://api.openf1.org/v1/stints?session_key=9165&driver_number=16"
+          echo "--- first 500 bytes of response ---"
+          head -c 500 body.json
+          echo
