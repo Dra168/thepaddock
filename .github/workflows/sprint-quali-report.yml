@@ -41,7 +41,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           ARGS=""
-          ARGS="$ARGS --session "Sprint Qualifying""
+          ARGS="$ARGS --session 'Sprint Qualifying'"
           if [ -n "${{ github.event.inputs.year }}" ]; then
             ARGS="$ARGS --year ${{ github.event.inputs.year }}"
           fi
