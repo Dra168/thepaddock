@@ -2,7 +2,7 @@ name: Sprint Report
 
 on:
   schedule:
-    # Saturday 18:00 UTC / Sunday 02:00 HK. The sprint race runs on Saturday morning or midday.
+    # Saturday 18:00 UTC / Sunday 02:00 HK. The sprint runs on Saturday.
     - cron: "0 18 * * 6"
   workflow_dispatch:
     inputs:
@@ -39,27 +39,36 @@ jobs:
       - name: Build and post sprint report
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Inputs come in as environment variables rather than being pasted
+          # into the script text. Nothing is quoted into a string and nothing
+          # is eval'd, so values containing spaces (Sprint Qualifying, Las
+          # Vegas) cannot break the command.
+          IN_YEAR: ${{ github.event.inputs.year }}
+          IN_ROUND: ${{ github.event.inputs.round }}
+          IN_LOOKBACK: ${{ github.event.inputs.lookback }}
+          IN_DRY: ${{ github.event.inputs.dry_run }}
         run: |
-          ARGS=""
-          if [ -n "${{ github.event.inputs.year }}" ]; then
-            ARGS="$ARGS --year ${{ github.event.inputs.year }}"
+          ARGS=()
+          if [ -n "$IN_YEAR" ]; then
+            ARGS+=(--year "$IN_YEAR")
           fi
-          if [ -n "${{ github.event.inputs.round }}" ]; then
-            ARGS="$ARGS --round '${{ github.event.inputs.round }}'"
+          if [ -n "$IN_ROUND" ]; then
+            ARGS+=(--round "$IN_ROUND")
           fi
-          if [ -n "${{ github.event.inputs.lookback }}" ]; then
-            ARGS="$ARGS --lookback ${{ github.event.inputs.lookback }}"
+          if [ -n "$IN_LOOKBACK" ]; then
+            ARGS+=(--lookback "$IN_LOOKBACK")
           fi
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            ARGS="$ARGS --dry-run"
+          if [ "$IN_DRY" = "true" ]; then
+            ARGS+=(--dry-run)
           fi
-          eval python sprint_report.py $ARGS
+          echo "running: sprint_report.py ${ARGS[@]}"
+          python sprint_report.py "${ARGS[@]}"
 
       - name: Upload charts as artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sprint-report-charts
+          name: sprint-charts
           path: out/
           if-no-files-found: ignore
           retention-days: 14
