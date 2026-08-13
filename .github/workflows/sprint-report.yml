@@ -1,0 +1,65 @@
+name: Sprint Report
+
+on:
+  schedule:
+    # Saturday 18:00 UTC / Sunday 02:00 HK. The sprint race runs on Saturday morning or midday.
+    - cron: "0 18 * * 6"
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "Season (leave blank to auto-detect the most recent session)"
+        required: false
+      round:
+        description: "Country, circuit or location, e.g. Hungary (leave blank to auto-detect)"
+        required: false
+      lookback:
+        description: "Hours to look back when auto-detecting (default 96)"
+        required: false
+      dry_run:
+        description: "Build charts without posting"
+        type: boolean
+        default: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build and post sprint report
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.year }}" ]; then
+            ARGS="$ARGS --year ${{ github.event.inputs.year }}"
+          fi
+          if [ -n "${{ github.event.inputs.round }}" ]; then
+            ARGS="$ARGS --round '${{ github.event.inputs.round }}'"
+          fi
+          if [ -n "${{ github.event.inputs.lookback }}" ]; then
+            ARGS="$ARGS --lookback ${{ github.event.inputs.lookback }}"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          eval python sprint_report.py $ARGS
+
+      - name: Upload charts as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint-report-charts
+          path: out/
+          if-no-files-found: ignore
+          retention-days: 14
