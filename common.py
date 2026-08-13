@@ -93,6 +93,64 @@ def find_recent_session(session_name, lookback_hours=96):
     return None
 
 
+def find_recent_sessions(session_names, lookback_hours=22):
+    """Every session in `session_names` that finished inside the window.
+
+    Used by the practice report, which posts one message per practice DAY
+    rather than per session: a Friday run picks up FP1 and FP2 together, a
+    Saturday run picks up FP3 alone, and on a sprint weekend the Friday run
+    picks up FP1 by itself because FP2 and FP3 do not exist.
+
+    Results are restricted to a single meeting, so a stale session from the
+    previous round can never be mixed in, and are returned in session order.
+    """
+    now = datetime.now(timezone.utc)
+    found = []
+    for year in (now.year, now.year - 1):
+        for name in session_names:
+            for sess in openf1("sessions", year=year, session_name=name):
+                if sess.get("is_cancelled"):
+                    continue
+                end = sess.get("date_end")
+                if not end:
+                    continue
+                try:
+                    ended = pd.Timestamp(end)
+                except Exception:
+                    continue
+                if ended.tzinfo is None:
+                    ended = ended.tz_localize("UTC")
+                age = now - ended
+                if timedelta(minutes=20) < age < timedelta(hours=lookback_hours):
+                    found.append((ended, sess))
+        if found:
+            break
+
+    if not found:
+        return []
+
+    # keep only the most recent meeting, in case a window ever spans two
+    latest_meeting = max(found, key=lambda x: x[0])[1].get("meeting_key")
+    found = [f for f in found if f[1].get("meeting_key") == latest_meeting]
+    found.sort(key=lambda x: x[0])
+    return [sess for _, sess in found]
+
+
+def find_sessions(year, session_names, round_hint=None):
+    """All sessions of these names for one meeting, for manual runs."""
+    out = []
+    for name in session_names:
+        sess = find_session(year, name, round_hint)
+        if sess:
+            out.append(sess)
+    if not out:
+        return []
+    latest = out[-1].get("meeting_key")
+    out = [s for s in out if s.get("meeting_key") == latest]
+    out.sort(key=lambda s: str(s.get("date_start")))
+    return out
+
+
 def find_session(year, session_name, round_hint=None):
     """Find a session by year and name, optionally narrowed by a country or
     circuit name fragment. Returns the session dict or None."""
