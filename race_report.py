@@ -247,66 +247,23 @@ def fetch_openf1_stints(year, race_date, number_to_driver):
         stints.get("compound", pd.Series(dtype=str))
         .fillna("UNKNOWN").astype(str).str.upper()
     )
-    print(f"openf1: matched session {session_key}, {len(stints)} stints with compounds")
+    # Duplicate (driver, stint) records would draw stacked bars on one row and
+    # look like phantom stops, so drop them and say so.
+    before = len(stints)
+    stints = stints.drop_duplicates(subset=["driverId", "stint_number"], keep="first")
+    if len(stints) != before:
+        print(f"openf1: dropped {before - len(stints)} duplicate stint record(s)")
+
+    counts = stints.groupby("driverId").size()
+    print(f"openf1: matched session {session_key}, {len(stints)} stints "
+          f"across {len(counts)} drivers "
+          f"(min {counts.min()}, max {counts.max()} per driver)")
+    if counts.max() > 5:
+        worst = counts.idxmax()
+        print(f"openf1: WARNING {worst} has {counts.max()} stints, which is "
+              f"implausible; the driver number mapping is probably wrong")
+
     return stints.sort_values(["driverId", "stint_number"])
-
-
-def coalesce_stints(stints, pits):
-    """Merge OpenF1 stint records that describe one physical set of tyres.
-
-    OpenF1 sometimes emits several consecutive records for a single stint, so a
-    one-stopper can come back looking like a three-stopper on the same compound.
-    Consecutive same-compound records are merged UNLESS Jolpica shows a pit stop
-    at the boundary, which is what distinguishes a split record from a driver
-    genuinely fitting another set of the same compound.
-    """
-    if stints is None or stints.empty:
-        return stints
-
-    pit_laps = {}
-    if pits is not None and not pits.empty:
-        for _, row in pits.iterrows():
-            pit_laps.setdefault(row["driverId"], set()).add(int(row["lap"]))
-
-    merged, n_merges = [], 0
-    for drv, group in stints.groupby("driverId"):
-        group = group.sort_values("stint_number")
-        current = None
-        for _, st in group.iterrows():
-            st = st.copy()
-            if current is None:
-                current = st
-                continue
-
-            prev_end, start = current.get("lap_end"), st.get("lap_start")
-            same = st["compound"] == current["compound"]
-            contiguous = (
-                pd.notna(prev_end) and pd.notna(start)
-                and int(start) <= int(prev_end) + 1
-            )
-            # a stop on the lap before this stint means it really is a new set
-            stopped = (
-                pd.notna(start)
-                and any(abs(int(start) - 1 - lap) <= 1 for lap in pit_laps.get(drv, ()))
-            )
-
-            if same and contiguous and not stopped:
-                current["lap_end"] = st.get("lap_end")
-                n_merges += 1
-                continue
-
-            merged.append(current)
-            current = st
-        if current is not None:
-            merged.append(current)
-
-    if n_merges:
-        print(f"openf1: merged {n_merges} split stint record(s)")
-
-    out = pd.DataFrame(merged)
-    # renumber so stint_number reflects actual sets after merging
-    out["stint_number"] = out.groupby("driverId").cumcount() + 1
-    return out
 
 
 def load_race(ergast, year, rnd):
@@ -344,17 +301,20 @@ def load_race(ergast, year, rnd):
         laps["seconds"] = pd.to_timedelta(laps["time"], errors="coerce").dt.total_seconds()
 
     # OpenF1 keys on the car number actually raced. Jolpica gives that as
-    # `number`; `driverNumber` is the permanent number and differs for the
-    # reigning champion running #1, so prefer `number` and fall back.
+    # `number`; `driverNumber` is the permanent number. Register ONE number per
+    # driver: registering both would alias a second number onto the same driver,
+    # and any OpenF1 record carrying that number would then be drawn on the
+    # wrong row, silently stacking two drivers' stints on top of each other.
     number_to_driver = {}
     for _, row in results.iterrows():
-        for col in ("number", "driverNumber"):
-            val = row.get(col)
-            if pd.notna(val):
-                number_to_driver.setdefault(int(val), row["driverId"])
+        val = row.get("number")
+        if pd.isna(val):
+            val = row.get("driverNumber")
+        if pd.notna(val):
+            number_to_driver[int(val)] = row["driverId"]
 
     race_name, race_date = fetch_race_meta(ergast, year, rnd)
-    stints = coalesce_stints(fetch_openf1_stints(year, race_date, number_to_driver), pits)
+    stints = fetch_openf1_stints(year, race_date, number_to_driver)
 
     return results, laps, pits, stints, meta, race_name
 
