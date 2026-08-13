@@ -152,7 +152,6 @@ def build_caption(df, labels, sess):
                          f"{ranked.loc[i, 'code']}, {diffs.min():.3f}s")
 
     lines.append("")
-    lines.append("Data via OpenF1. Argue about it below.")
     return "\n".join(lines)
 
 
