@@ -251,6 +251,64 @@ def fetch_openf1_stints(year, race_date, number_to_driver):
     return stints.sort_values(["driverId", "stint_number"])
 
 
+def coalesce_stints(stints, pits):
+    """Merge OpenF1 stint records that describe one physical set of tyres.
+
+    OpenF1 sometimes emits several consecutive records for a single stint, so a
+    one-stopper can come back looking like a three-stopper on the same compound.
+    Consecutive same-compound records are merged UNLESS Jolpica shows a pit stop
+    at the boundary, which is what distinguishes a split record from a driver
+    genuinely fitting another set of the same compound.
+    """
+    if stints is None or stints.empty:
+        return stints
+
+    pit_laps = {}
+    if pits is not None and not pits.empty:
+        for _, row in pits.iterrows():
+            pit_laps.setdefault(row["driverId"], set()).add(int(row["lap"]))
+
+    merged, n_merges = [], 0
+    for drv, group in stints.groupby("driverId"):
+        group = group.sort_values("stint_number")
+        current = None
+        for _, st in group.iterrows():
+            st = st.copy()
+            if current is None:
+                current = st
+                continue
+
+            prev_end, start = current.get("lap_end"), st.get("lap_start")
+            same = st["compound"] == current["compound"]
+            contiguous = (
+                pd.notna(prev_end) and pd.notna(start)
+                and int(start) <= int(prev_end) + 1
+            )
+            # a stop on the lap before this stint means it really is a new set
+            stopped = (
+                pd.notna(start)
+                and any(abs(int(start) - 1 - lap) <= 1 for lap in pit_laps.get(drv, ()))
+            )
+
+            if same and contiguous and not stopped:
+                current["lap_end"] = st.get("lap_end")
+                n_merges += 1
+                continue
+
+            merged.append(current)
+            current = st
+        if current is not None:
+            merged.append(current)
+
+    if n_merges:
+        print(f"openf1: merged {n_merges} split stint record(s)")
+
+    out = pd.DataFrame(merged)
+    # renumber so stint_number reflects actual sets after merging
+    out["stint_number"] = out.groupby("driverId").cumcount() + 1
+    return out
+
+
 def load_race(ergast, year, rnd):
     results = fetch_all_pages(ergast.get_race_results, season=year, round=rnd)
     if results.empty:
@@ -296,7 +354,7 @@ def load_race(ergast, year, rnd):
                 number_to_driver.setdefault(int(val), row["driverId"])
 
     race_name, race_date = fetch_race_meta(ergast, year, rnd)
-    stints = fetch_openf1_stints(year, race_date, number_to_driver)
+    stints = coalesce_stints(fetch_openf1_stints(year, race_date, number_to_driver), pits)
 
     return results, laps, pits, stints, meta, race_name
 
