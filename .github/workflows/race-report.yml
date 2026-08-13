@@ -1,0 +1,68 @@
+name: Race Report
+
+on:
+  schedule:
+    # Monday 06:00 UTC = Monday 14:00 Hong Kong time.
+    # Late enough that Sunday's race data has settled, including late US races.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "Season (leave blank to auto-detect the most recent race)"
+        required: false
+      round:
+        description: "Round number (leave blank to auto-detect)"
+        required: false
+      dry_run:
+        description: "Build charts without posting"
+        type: boolean
+        default: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Restore FastF1 cache
+        uses: actions/cache@v4
+        with:
+          path: cache
+          key: fastf1-${{ github.run_id }}
+          restore-keys: |
+            fastf1-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build and post race report
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.year }}" ]; then
+            ARGS="$ARGS --year ${{ github.event.inputs.year }}"
+          fi
+          if [ -n "${{ github.event.inputs.round }}" ]; then
+            ARGS="$ARGS --round ${{ github.event.inputs.round }}"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          python race_report.py $ARGS
+
+      - name: Upload charts as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: race-charts
+          path: out/
+          if-no-files-found: ignore
+          retention-days: 14
