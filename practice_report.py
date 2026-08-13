@@ -1,14 +1,25 @@
 """
 The Paddock - practice report.
 
+Posts one consolidated message per practice DAY rather than one per session,
+because the weekend format decides how many sessions there are:
+
+    Normal weekend    Friday: FP1 + FP2      Saturday: FP3
+    Sprint weekend    Friday: FP1 only       Saturday: nothing
+
+Both are handled by the same workflow running twice, with a lookback window
+narrow enough that the Saturday run cannot reach back into Friday. Nothing is
+configured per weekend format; the Saturday run on a sprint weekend simply
+finds no session and exits.
+
 Practice is not in Jolpica at all, so everything here comes from OpenF1.
 
-Practice is about two different things at once: one-lap pace on low fuel and
-long-run pace on high fuel. The charts separate them, because the headline
-timesheet on its own is close to meaningless.
+Practice is two different things at once: one-lap pace on low fuel and long-run
+pace on high fuel. The charts separate them, because the headline timesheet on
+its own is close to meaningless.
 
     python practice_report.py --dry-run
-    python practice_report.py --session "Practice 2" --year 2025 --round Hungary
+    python practice_report.py --year 2025 --round Hungary --dry-run
 """
 
 import argparse
@@ -19,9 +30,17 @@ import pandas as pd
 
 import common as c
 
+PRACTICE_NAMES = ["Practice 1", "Practice 2", "Practice 3"]
+
 # A long run is a sequence of laps on the same tyre with no pit-out in between.
 MIN_RUN_LAPS = 4
 QUICKLAP_THRESHOLD = 1.10  # practice fuel loads vary far more than a race
+
+
+def short_name(session_name):
+    """'Practice 2' -> 'FP2'"""
+    digits = "".join(ch for ch in str(session_name) if ch.isdigit())
+    return f"FP{digits}" if digits else str(session_name)
 
 
 def best_laps(results, meta):
@@ -31,22 +50,60 @@ def best_laps(results, meta):
         if num is None or int(num) not in meta:
             continue
         info = meta[int(num)]
-        best = c.scalar_value(r.get("duration"))
         rows.append({
             "driver_number": int(num),
             "position": r.get("position"),
             "code": info["code"],
             "team": info["team"],
             "color": info["color"],
-            "best": best,
+            "best": c.scalar_value(r.get("duration")),
             "laps": r.get("number_of_laps"),
         })
     df = pd.DataFrame(rows)
     if df.empty:
         return df
-    fastest = df["best"].min()
-    df["gap"] = df["best"] - fastest
+    df["gap"] = df["best"] - df["best"].min()
     return df.sort_values("position", na_position="last").reset_index(drop=True)
+
+
+def long_run_frame(laps, stints, meta):
+    """Laps belonging to a run of at least MIN_RUN_LAPS on one tyre.
+
+    Pit-out laps are dropped, then anything outside the threshold, which strips
+    aborted laps, traffic and in-laps without needing fuel-load data.
+    """
+    if laps.empty:
+        return pd.DataFrame()
+
+    df = laps.dropna(subset=["seconds"]).copy()
+    if "is_pit_out_lap" in df.columns:
+        df = df[df["is_pit_out_lap"] != True]  # noqa: E712 (may be object dtype)
+    if df.empty:
+        return pd.DataFrame()
+
+    df["compound"] = "UNKNOWN"
+    df["run"] = 0
+    if not stints.empty:
+        for _, st in stints.iterrows():
+            num, start = st.get("driver_number"), st.get("lap_start")
+            if pd.isna(start):
+                continue
+            end = st.get("lap_end")
+            end = end if pd.notna(end) else df["lap_number"].max()
+            sel = ((df["driver_number"] == num)
+                   & (df["lap_number"] >= start) & (df["lap_number"] <= end))
+            df.loc[sel, "compound"] = st["compound"]
+            df.loc[sel, "run"] = st.get("stint_number", 0)
+
+    keep = [g for _, g in df.groupby(["driver_number", "run"]) if len(g) >= MIN_RUN_LAPS]
+    if not keep:
+        return pd.DataFrame()
+
+    out = pd.concat(keep, ignore_index=True)
+    out = out[out["seconds"] <= out["seconds"].min() * QUICKLAP_THRESHOLD]
+    out["code"] = out["driver_number"].map(
+        lambda n: meta[int(n)]["code"] if int(n) in meta else str(n))
+    return out
 
 
 def chart_timesheet(df, title):
@@ -74,59 +131,13 @@ def chart_timesheet(df, title):
     return draw
 
 
-def long_run_frame(laps, stints, meta):
-    """Laps that belong to a run of at least MIN_RUN_LAPS on one tyre.
-
-    Pit-out laps are dropped, then anything outside the threshold, which strips
-    out aborted laps, traffic and in-laps without needing fuel-load data.
-    """
-    if laps.empty:
-        return pd.DataFrame()
-
-    df = laps.dropna(subset=["seconds"]).copy()
-    if "is_pit_out_lap" in df.columns:
-        df = df[df["is_pit_out_lap"] != True]  # noqa: E712 (may be object dtype)
-    if df.empty:
-        return pd.DataFrame()
-
-    # tag each lap with the stint it belongs to, so compounds can colour it
-    df["compound"] = "UNKNOWN"
-    df["run"] = 0
-    if not stints.empty:
-        for _, st in stints.iterrows():
-            num, start, end = st.get("driver_number"), st.get("lap_start"), st.get("lap_end")
-            if pd.isna(start):
-                continue
-            end = end if pd.notna(end) else df["lap_number"].max()
-            sel = ((df["driver_number"] == num)
-                   & (df["lap_number"] >= start) & (df["lap_number"] <= end))
-            df.loc[sel, "compound"] = st["compound"]
-            df.loc[sel, "run"] = st.get("stint_number", 0)
-
-    keep = []
-    for (num, run), group in df.groupby(["driver_number", "run"]):
-        if len(group) >= MIN_RUN_LAPS:
-            keep.append(group)
-    if not keep:
-        return pd.DataFrame()
-
-    out = pd.concat(keep, ignore_index=True)
-    cutoff = out["seconds"].min() * QUICKLAP_THRESHOLD
-    out = out[out["seconds"] <= cutoff]
-    out["code"] = out["driver_number"].map(
-        lambda n: meta[int(n)]["code"] if int(n) in meta else str(n))
-    return out
-
-
 def chart_long_runs(runs, meta, title, n=10):
     def draw(path):
         if runs.empty:
-            raise ValueError("no long runs found in this session")
+            raise ValueError("no long runs found")
         medians = runs.groupby("driver_number")["seconds"].median().sort_values()
-        top = list(medians.index[:n])
-
         data, colors, labels = [], [], []
-        for num in top:
+        for num in list(medians.index[:n]):
             vals = runs.loc[runs["driver_number"] == num, "seconds"]
             if len(vals) < MIN_RUN_LAPS:
                 continue
@@ -152,7 +163,6 @@ def chart_long_runs(runs, meta, title, n=10):
         for median in bp["medians"]:
             median.set_color("#ffffff")
             median.set_linewidth(1.6)
-
         ax.set_ylabel("Lap time (s)")
         ax.set_title(title)
         ax.grid(axis="y", alpha=0.2, color="#666666")
@@ -160,37 +170,45 @@ def chart_long_runs(runs, meta, title, n=10):
     return draw
 
 
-def build_caption(df, runs, sess):
-    name = sess.get("session_name", "Practice")
-    where = sess.get("country_name") or sess.get("circuit_short_name") or ""
-    lines = [f"## {where} {sess.get('year', '')} - {name}", ""]
+def build_caption(blocks, meeting, long_run_session):
+    where = meeting.get("country_name") or meeting.get("circuit_short_name") or ""
+    year = meeting.get("year", "")
+    names = " and ".join(b["short"] for b in blocks)
+    lines = [f"## {where} {year} - {names}", ""]
 
-    top = df.dropna(subset=["best"]).head(3)
-    for medal, (_, row) in zip(["🥇", "🥈", "🥉"], top.iterrows()):
-        gap = "" if row["gap"] == 0 else f" ({c.fmt_gap(row['gap'])})"
-        lines.append(f"{medal} **{row['code']}** ({row['team']}) "
-                     f"{c.fmt_time(row['best'])}{gap}")
-    lines.append("")
+    for block in blocks:
+        df = block["df"]
+        lines.append(f"**{block['short']}**")
+        for i, (_, row) in enumerate(df.dropna(subset=["best"]).head(3).iterrows()):
+            gap = "" if row["gap"] == 0 else f" ({c.fmt_gap(row['gap'])})"
+            lines.append(f"{i + 1}. {row['code']} ({row['team']}) "
+                         f"{c.fmt_time(row['best'])}{gap}")
+        lines.append("")
 
-    if not runs.empty:
+    if long_run_session is not None:
+        runs = long_run_session["runs"]
         medians = runs.groupby("code")["seconds"].median().sort_values()
-        if len(medians) >= 1:
-            leader = medians.index[0]
-            lines.append(f"**Best long-run pace** {leader} "
-                         f"({c.fmt_time(medians.iloc[0])} median)")
-        if len(medians) >= 2:
-            lines.append(f"**Next best** {medians.index[1]} "
-                         f"(+{medians.iloc[1] - medians.iloc[0]:.3f}s)")
-        used = sorted(set(runs["compound"]) - {"UNKNOWN"})
-        if used:
-            lines.append(f"**Compounds run** {', '.join(t.title() for t in used)}")
+        if len(medians):
+            leader = medians.iloc[0]
+            chasers = ", ".join(
+                f"{code} (+{val - leader:.3f}s)"
+                for code, val in medians.iloc[1:3].items()
+            )
+            line = (f"**Long-run pace ({long_run_session['short']})** "
+                    f"{medians.index[0]} {c.fmt_time(leader)} median")
+            if chasers:
+                line += f", then {chasers}"
+            lines.append(line)
+            used = sorted(set(runs["compound"]) - {"UNKNOWN"})
+            if used:
+                lines.append(f"**Compounds run** {', '.join(t.title() for t in used)}")
     else:
-        lines.append("_No long runs long enough to analyse in this session._")
+        lines.append("_No long runs long enough to analyse._")
 
-    busiest = df.dropna(subset=["laps"])
+    busiest = pd.concat([b["df"] for b in blocks]).dropna(subset=["laps"])
     if not busiest.empty:
-        row = busiest.loc[busiest["laps"].idxmax()]
-        lines.append(f"**Most laps** {row['code']} ({int(row['laps'])})")
+        totals = busiest.groupby("code")["laps"].sum().sort_values(ascending=False)
+        lines.append(f"**Most laps** {totals.index[0]} ({int(totals.iloc[0])})")
 
     lines.append("")
     lines.append("One-lap pace is the timesheet; long runs are the real story. "
@@ -200,38 +218,71 @@ def build_caption(df, runs, sess):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--session", default="Practice 2",
-                        choices=["Practice 1", "Practice 2", "Practice 3"])
     c.add_common_args(parser, "Practice")
+    parser.set_defaults(lookback=22)
     args = parser.parse_args()
 
-    sess = c.resolve_session(args.session, args)
-    if not sess:
+    if args.year:
+        sessions = c.find_sessions(args.year, PRACTICE_NAMES, args.round)
+        if not sessions:
+            print(f"no practice sessions found for {args.year} {args.round or ''}")
+            return 0
+    else:
+        sessions = c.find_recent_sessions(PRACTICE_NAMES, args.lookback)
+        if not sessions:
+            print(f"no practice session finished in the last {args.lookback}h, "
+                  f"nothing to do")
+            return 0
+
+    print(f"found {len(sessions)}: "
+          f"{', '.join(short_name(s.get('session_name')) for s in sessions)}")
+
+    blocks = []
+    for sess in sessions:
+        key = sess["session_key"]
+        meta = c.load_drivers(key)
+        results = c.session_results(key)
+        if results.empty or not meta:
+            print(f"  {short_name(sess.get('session_name'))}: no results yet, skipping")
+            continue
+        df = best_laps(results, meta)
+        if df.empty:
+            print(f"  {short_name(sess.get('session_name'))}: no usable times, skipping")
+            continue
+        runs = long_run_frame(c.session_laps(key), c.session_stints(key), meta)
+        blocks.append({"sess": sess, "short": short_name(sess.get("session_name")),
+                       "df": df, "runs": runs, "meta": meta})
+        print(f"  {short_name(sess.get('session_name'))}: "
+              f"{len(df)} drivers, {len(runs)} long-run laps")
+
+    if not blocks:
+        print("nothing usable in any session")
         return 0
 
-    key = sess["session_key"]
-    meta = c.load_drivers(key)
-    results = c.session_results(key)
-    if results.empty or not meta:
-        print("no results or driver data available yet")
-        return 0
+    meeting = blocks[-1]["sess"]
+    where = meeting.get("country_name") or ""
+    year = meeting.get("year", "")
 
-    df = best_laps(results, meta)
-    if df.empty:
-        print("no usable lap times")
-        return 0
+    # the long-run chart comes from whichever session actually ran long runs,
+    # which is normally the last one of the day
+    with_runs = [b for b in blocks if not b["runs"].empty]
+    long_run_session = max(with_runs, key=lambda b: len(b["runs"])) if with_runs else None
 
-    runs = long_run_frame(c.session_laps(key), c.session_stints(key), meta)
-    print(f"{len(df)} drivers, {len(runs)} long-run laps")
+    specs = [
+        (f"practice_{b['short'].lower()}_timesheet.png",
+         chart_timesheet(b["df"], f"{where} {year} - {b['short']} timesheet"))
+        for b in blocks
+    ]
+    if long_run_session is not None:
+        specs.append((
+            "practice_long_runs.png",
+            chart_long_runs(long_run_session["runs"], long_run_session["meta"],
+                            f"{where} {year} - {long_run_session['short']} long-run pace"),
+        ))
 
-    where = sess.get("country_name") or ""
-    prefix = f"{where} {sess.get('year', '')} - {args.session}"
-
-    made = c.build_charts([
-        ("practice_timesheet.png", chart_timesheet(df, f"{prefix}: timesheet")),
-        ("practice_long_runs.png", chart_long_runs(runs, meta, f"{prefix}: long-run pace")),
-    ])
-    return c.post_to_discord(build_caption(df, runs, sess), made, args.dry_run)
+    made = c.build_charts(specs)
+    caption = build_caption(blocks, meeting, long_run_session)
+    return c.post_to_discord(caption, made, args.dry_run)
 
 
 if __name__ == "__main__":
