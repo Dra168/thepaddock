@@ -332,7 +332,10 @@ def chart_stints(results, laps, pits, stints, meta, path, title=""):
     if not use_compounds and pits.empty:
         raise ValueError("neither compound nor pit stop data available")
 
-    total_laps = int(results["laps"].max())
+    total = results["laps"].max()
+    if pd.isna(total):
+        raise ValueError("no lap counts in results")
+    total_laps = int(total)
     order = [row["driverId"] for _, row in results.iterrows()]
 
     fig, ax = plt.subplots(figsize=(9, 10))
@@ -347,9 +350,13 @@ def chart_stints(results, laps, pits, stints, meta, path, title=""):
         if use_compounds:
             rows = stints[stints["driverId"] == drv]
             if rows.empty:
+                print(f"openf1: no stint records for {code}, leaving row blank")
                 continue
             for _, st in rows.iterrows():
-                start = int(st.get("lap_start") or 1)
+                start = st.get("lap_start")
+                if pd.isna(start):
+                    continue  # no start lap means nothing sensible to draw
+                start = int(start)
                 end = st.get("lap_end")
                 end = int(end) if pd.notna(end) else last_lap
                 width = end - start + 1
@@ -464,6 +471,19 @@ def chart_position_changes(results, laps, pits, stints, meta, path, title=""):
     if laps.empty or "position" not in laps.columns:
         raise ValueError("no per-lap position data available")
 
+    # Lap times start at lap 1, so without this the chart opens after the first
+    # lap is already run and the start itself is invisible. Grid slots come from
+    # the results frame. Ergast uses grid 0 for a pit lane start, which has no
+    # grid slot to plot, so those lines simply begin at lap 1.
+    grid = {}
+    for _, row in results.iterrows():
+        g = row.get("grid")
+        if pd.notna(g) and int(g) > 0:
+            grid[row["driverId"]] = int(g)
+    pit_starts = [meta[d]["code"] for d in meta if d not in grid]
+    if pit_starts:
+        print(f"grid: no starting slot for {', '.join(pit_starts)} (pit lane start)")
+
     fig, ax = plt.subplots(figsize=(11, 6.5))
     style_axes(ax)
 
@@ -471,9 +491,13 @@ def chart_position_changes(results, laps, pits, stints, meta, path, title=""):
         if drv not in meta:
             continue
         group = group.sort_values("number")
+        x = group["number"].tolist()
+        y = group["position"].tolist()
+        if drv in grid:
+            x = [0] + x
+            y = [grid[drv]] + y
         ax.plot(
-            group["number"],
-            group["position"],
+            x, y,
             label=meta[drv]["code"],
             color=meta[drv]["color"],
             linestyle=meta[drv].get("linestyle", "-"),
@@ -483,8 +507,10 @@ def chart_position_changes(results, laps, pits, stints, meta, path, title=""):
     n_drivers = max(len(meta), 20)
     ax.set_ylim([n_drivers + 0.5, 0.5])
     ax.set_yticks([1, 5, 10, 15, 20])
+    ax.set_xlim(left=0)
+    ax.axvline(0, color="#777777", linewidth=0.8, linestyle=":")
     ax.set_title(title)
-    ax.set_xlabel("Lap")
+    ax.set_xlabel("Lap (0 = grid)")
     ax.set_ylabel("Position")
     ax.legend(
         bbox_to_anchor=(1.01, 1.0), loc="upper left", fontsize="small",
@@ -552,11 +578,14 @@ def build_caption(results, laps, pits, stints, meta, year, race_name):
         if won is not None and not won.empty:
             parts = []
             for _, st in won.iterrows():
-                start = int(st.get("lap_start") or 1)
+                start = st.get("lap_start")
+                if pd.isna(start):
+                    continue
+                start = int(start)
                 end = st.get("lap_end")
                 end = int(end) if pd.notna(end) else last
                 parts.append(f"{st['compound'].title()} ({end - start + 1})")
-            n_stops = max(len(parts) - 1, 0)
+            n_stops = max(len(parts) - 1, 0)  # parts excludes skipped records
             label = "stop" if n_stops == 1 else "stops"
             lines.append(
                 f"**Winning strategy** {n_stops}-{label}, " + " → ".join(parts)
