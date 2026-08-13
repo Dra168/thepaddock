@@ -37,18 +37,22 @@ jobs:
       - name: Build and post race report
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          IN_YEAR: ${{ github.event.inputs.year }}
+          IN_ROUND: ${{ github.event.inputs.round }}
+          IN_DRY: ${{ github.event.inputs.dry_run }}
         run: |
-          ARGS=""
-          if [ -n "${{ github.event.inputs.year }}" ]; then
-            ARGS="$ARGS --year ${{ github.event.inputs.year }}"
+          ARGS=()
+          if [ -n "$IN_YEAR" ]; then
+            ARGS+=(--year "$IN_YEAR")
           fi
-          if [ -n "${{ github.event.inputs.round }}" ]; then
-            ARGS="$ARGS --round ${{ github.event.inputs.round }}"
+          if [ -n "$IN_ROUND" ]; then
+            ARGS+=(--round "$IN_ROUND")
           fi
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            ARGS="$ARGS --dry-run"
+          if [ "$IN_DRY" = "true" ]; then
+            ARGS+=(--dry-run)
           fi
-          python race_report.py $ARGS
+          echo "running: race_report.py ${ARGS[@]}"
+          python race_report.py "${ARGS[@]}"
 
       - name: Upload charts as artifacts
         if: always()
