@@ -161,6 +161,23 @@ def find_recent_race(ergast, lookback_hours=LOOKBACK_HOURS):
     return found
 
 
+def fetch_race_meta(ergast, year, rnd):
+    """Return (raceName, raceDate) for a round.
+
+    These live in an ErgastMultiResponse's `.description`, not its `.content`,
+    and `fetch_all_pages` only concatenates `.content`. So ask the schedule
+    endpoint directly rather than looking for them on the results frame.
+    """
+    try:
+        sched = ergast.get_race_schedule(season=year, round=rnd, limit=100)
+        if len(sched):
+            row = sched.iloc[0]
+            return row.get("raceName"), row.get("raceDate")
+    except Exception as exc:
+        print(f"could not load race metadata: {exc}")
+    return None, None
+
+
 def fetch_openf1_stints(year, race_date, number_to_driver):
     """Fetch tyre stints from OpenF1 and key them by Jolpica driverId.
 
@@ -278,10 +295,10 @@ def load_race(ergast, year, rnd):
             if pd.notna(val):
                 number_to_driver.setdefault(int(val), row["driverId"])
 
-    race_date = results.iloc[0].get("raceDate")
+    race_name, race_date = fetch_race_meta(ergast, year, rnd)
     stints = fetch_openf1_stints(year, race_date, number_to_driver)
 
-    return results, laps, pits, stints, meta
+    return results, laps, pits, stints, meta, race_name
 
 
 # ---------------------------------------------------------------- charts
@@ -599,9 +616,8 @@ def main():
         year, rnd, race_name = found
 
     print(f"loading {year} round {rnd} {race_name or ''}")
-    results, laps, pits, stints, meta = load_race(ergast, year, rnd)
-    if race_name is None:
-        race_name = results.iloc[0].get("raceName", f"Round {rnd}")
+    results, laps, pits, stints, meta, fetched_name = load_race(ergast, year, rnd)
+    race_name = race_name or fetched_name or f"Round {rnd}"
     print(f"{len(results)} results, {len(laps)} lap records, {len(pits)} pit stops")
 
     charts = [
