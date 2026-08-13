@@ -602,7 +602,6 @@ def build_caption(results, laps, pits, stints, meta, year, race_name):
 
     lines.append("")
     source = "Jolpica-F1 and OpenF1" if stints is not None else "Jolpica-F1"
-    lines.append(f"Data via {source}. Argue about it below.")
 
     return "\n".join(lines)[:1990]
 
