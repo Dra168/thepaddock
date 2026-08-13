@@ -1,11 +1,21 @@
 """
-The Paddock - race report bot
-Pulls the most recent F1 race with FastF1, builds charts, posts to a Discord webhook.
+The Paddock - race report bot (Jolpica edition)
+
+Pulls the most recent F1 race and posts three charts plus a writeup to a Discord
+webhook.
+
+Results, lap times and pit stops come from the Jolpica-F1 API (the successor to
+Ergast) through fastf1.ergast. Tyre compounds come from OpenF1. Nothing touches
+F1's livetiming API, which does not serve datacenter IP ranges and therefore
+fails on GitHub Actions runners.
+
+If OpenF1 is unreachable the strategy chart falls back to pit-stop-derived
+stints coloured by stint number, so a failure there costs colour, not the post.
 
 Usage:
-    python race_report.py                  # find the most recent race automatically
+    python race_report.py                          # most recent finished race
     python race_report.py --year 2025 --round 14
-    python race_report.py --year 2025 --round 14 --dry-run   # build charts, don't post
+    python race_report.py --year 2025 --round 14 --dry-run
 """
 
 import argparse
@@ -21,76 +31,123 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import requests
 
-import fastf1
-import fastf1.plotting
+from fastf1 import Cache
+from fastf1.ergast import Ergast
 
 CACHE_DIR = Path("cache")
 OUT_DIR = Path("out")
-LOOKBACK_HOURS = 96          # how far back to search for a finished race
+LOOKBACK_HOURS = 96
 WEBHOOK_USERNAME = "The Paddock"
-GREY = "#888888"
+PAGE_SIZE = 1000          # Jolpica's maximum per request
+QUICKLAP_THRESHOLD = 1.07  # keep laps within 107% of the fastest lap
+
+# Constructor colours. Jolpica gives constructorId, not a colour, so this is
+# ours to maintain. Unknown IDs fall back to the palette below, so a new team
+# still plots, just not in its own colour.
+TEAM_COLORS = {
+    "red_bull": "#3671C6",
+    "ferrari": "#E8002D",
+    "mercedes": "#27F4D2",
+    "mclaren": "#FF8000",
+    "aston_martin": "#229971",
+    "alpine": "#FF87BC",
+    "williams": "#64C4FF",
+    "rb": "#6692FF",
+    "racing_bulls": "#6692FF",
+    "alphatauri": "#6692FF",
+    "sauber": "#52E252",
+    "kick_sauber": "#52E252",
+    "audi": "#52E252",
+    "alfa": "#52E252",
+    "haas": "#B6BABD",
+    "cadillac": "#B08D57",
+}
+FALLBACK_COLORS = [
+    "#8E7CC3", "#D9A441", "#5FA8D3", "#C36B6B",
+    "#7FB069", "#B5838D", "#9C89B8", "#E0A458",
+]
+STINT_SHADES = ["#E8002D", "#F5A623", "#4A90D9", "#7FB069", "#B5838D", "#9C89B8"]
+
+# OpenF1 supplies tyre compounds, which Jolpica does not carry. Data from 2023 on.
+OPENF1_BASE = "https://api.openf1.org/v1"
+OPENF1_TIMEOUT = 20
+COMPOUND_COLORS = {
+    "SOFT": "#DA291C",
+    "MEDIUM": "#FFD12E",
+    "HARD": "#F0F0EC",
+    "INTERMEDIATE": "#43B02A",
+    "WET": "#0067AD",
+    "UNKNOWN": "#888888",
+}
 
 
-# ---------------------------------------------------------------- setup
+# ---------------------------------------------------------------- plumbing
 
 
-def setup():
-    CACHE_DIR.mkdir(exist_ok=True)
-    OUT_DIR.mkdir(exist_ok=True)
-    fastf1.Cache.enable_cache(str(CACHE_DIR))
-    try:
-        fastf1.plotting.setup_mpl(
-            mpl_timedelta_support=True,
-            color_scheme="fastf1",
-        )
-    except TypeError:
-        # signature changed, fall back to defaults
-        fastf1.plotting.setup_mpl()
+def style_axes(ax):
+    ax.set_facecolor("#1e1e1e")
+    ax.figure.set_facecolor("#1e1e1e")
+    for spine in ax.spines.values():
+        spine.set_color("#555555")
+    ax.tick_params(colors="#dddddd")
+    ax.xaxis.label.set_color("#dddddd")
+    ax.yaxis.label.set_color("#dddddd")
+    ax.title.set_color("#ffffff")
 
 
-def driver_color(abb, session):
-    try:
-        return fastf1.plotting.get_driver_color(abb, session=session)
-    except Exception:
-        return GREY
+def fetch_all_pages(fn, **kwargs):
+    """Call an Ergast/Jolpica endpoint and concatenate every page of results.
+
+    A race has roughly 20 drivers x 60+ laps of lap times, well past the
+    per-request cap, so lap times always need more than one page.
+    """
+    resp = fn(limit=PAGE_SIZE, **kwargs)
+    frames = list(resp.content)
+    guard = 0
+    while not resp.is_complete and guard < 20:
+        resp = resp.get_next_result_page()
+        frames.extend(resp.content)
+        guard += 1
+    frames = [f for f in frames if f is not None and len(f)]
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
-def compound_color(compound, session):
-    try:
-        return fastf1.plotting.get_compound_color(compound, session=session)
-    except Exception:
-        return GREY
+def team_color(constructor_id, index=0):
+    if constructor_id in TEAM_COLORS:
+        return TEAM_COLORS[constructor_id]
+    return FALLBACK_COLORS[index % len(FALLBACK_COLORS)]
 
 
-# ---------------------------------------------------------------- finding the race
+# ---------------------------------------------------------------- data
 
 
-def find_recent_race(lookback_hours=LOOKBACK_HOURS):
-    """Return (year, round_number) for the most recent race that has finished."""
+def find_recent_race(ergast, lookback_hours=LOOKBACK_HOURS):
+    """Return (year, round) for the most recent race that has finished."""
     now = datetime.now(timezone.utc)
     found = None
 
     for year in (now.year, now.year - 1):
         try:
-            schedule = fastf1.get_event_schedule(year, include_testing=False)
+            schedule = ergast.get_race_schedule(season=year)
         except Exception as exc:
             print(f"could not load {year} schedule: {exc}")
             continue
 
-        for _, event in schedule.iterrows():
-            try:
-                race_date = event.get_session_date("Race", utc=True)
-            except Exception:
+        for _, race in schedule.iterrows():
+            date, time = race.get("raceDate"), race.get("raceTime")
+            if pd.isna(date):
                 continue
-            if race_date is None or pd.isna(race_date):
-                continue
-            if race_date.tzinfo is None:
-                race_date = race_date.tz_localize("UTC")
+            when = pd.Timestamp(date)
+            if not pd.isna(time):
+                when = pd.Timestamp(f"{pd.Timestamp(date).date()} {time}")
+            when = when.tz_localize("UTC") if when.tzinfo is None else when
 
-            age = now - race_date
+            age = now - when
             # race must be over (allow ~3h of running) and inside the window
             if timedelta(hours=3) < age < timedelta(hours=lookback_hours):
-                found = (year, int(event["RoundNumber"]), event["EventName"])
+                found = (year, int(race["round"]), race["raceName"])
 
         if found:
             break
@@ -98,113 +155,303 @@ def find_recent_race(lookback_hours=LOOKBACK_HOURS):
     return found
 
 
+def fetch_openf1_stints(year, race_date, number_to_driver):
+    """Fetch tyre stints from OpenF1 and key them by Jolpica driverId.
+
+    Returns a DataFrame with driverId, stint_number, compound, lap_start,
+    lap_end, tyre_age_at_start, or None if anything goes wrong. Every caller
+    must handle None: OpenF1 is a second upstream and a nice-to-have, not a
+    dependency the report is allowed to die on.
+    """
+    if race_date is None or pd.isna(race_date):
+        print("openf1: no race date to match on, skipping compounds")
+        return None
+    target = pd.Timestamp(race_date).date()
+
+    try:
+        sessions = requests.get(
+            f"{OPENF1_BASE}/sessions",
+            params={"year": int(year), "session_name": "Race"},
+            timeout=OPENF1_TIMEOUT,
+        )
+        sessions.raise_for_status()
+        sessions = sessions.json()
+    except Exception as exc:
+        print(f"openf1: session lookup failed ({exc}), falling back to stint numbers")
+        return None
+
+    # match the OpenF1 session to the Jolpica round by date
+    session_key = None
+    for sess in sessions:
+        start = sess.get("date_start")
+        if not start:
+            continue
+        try:
+            if pd.Timestamp(start).date() == target:
+                session_key = sess.get("session_key")
+                break
+        except Exception:
+            continue
+
+    if session_key is None:
+        print(f"openf1: no Race session found for {target}, falling back")
+        return None
+
+    try:
+        resp = requests.get(
+            f"{OPENF1_BASE}/stints",
+            params={"session_key": session_key},
+            timeout=OPENF1_TIMEOUT,
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+    except Exception as exc:
+        print(f"openf1: stint fetch failed ({exc}), falling back to stint numbers")
+        return None
+
+    if not raw:
+        print("openf1: session had no stint data, falling back")
+        return None
+
+    stints = pd.DataFrame(raw)
+    stints["driverId"] = stints["driver_number"].map(number_to_driver)
+    stints = stints.dropna(subset=["driverId"])
+    if stints.empty:
+        print("openf1: could not match any driver numbers, falling back")
+        return None
+
+    stints["compound"] = (
+        stints.get("compound", pd.Series(dtype=str))
+        .fillna("UNKNOWN").astype(str).str.upper()
+    )
+    print(f"openf1: matched session {session_key}, {len(stints)} stints with compounds")
+    return stints.sort_values(["driverId", "stint_number"])
+
+
+def load_race(ergast, year, rnd):
+    results = fetch_all_pages(ergast.get_race_results, season=year, round=rnd)
+    if results.empty:
+        raise ValueError(f"no results available for {year} round {rnd}")
+
+    laps = fetch_all_pages(ergast.get_lap_times, season=year, round=rnd)
+    pits = fetch_all_pages(ergast.get_pit_stops, season=year, round=rnd)
+
+    results = results.sort_values("position").reset_index(drop=True)
+
+    # driverId is the only key lap times carry, so map it to everything else
+    meta = {}
+    seen_team = {}
+    for i, row in results.iterrows():
+        code = row.get("driverCode")
+        if not isinstance(code, str) or not code:
+            code = str(row.get("familyName", row["driverId"]))[:3].upper()
+        # teammates share a colour, so vary the linestyle to tell them apart
+        cid = row.get("constructorId")
+        nth = seen_team.get(cid, 0)
+        seen_team[cid] = nth + 1
+        meta[row["driverId"]] = {
+            "code": code,
+            "team": row.get("constructorName", ""),
+            "color": team_color(cid, i),
+            "linestyle": ["-", "--", ":"][nth % 3],
+            "position": row.get("position"),
+        }
+
+    if not laps.empty:
+        laps = laps.copy()
+        laps["code"] = laps["driverId"].map(lambda d: meta.get(d, {}).get("code", d))
+        laps["seconds"] = pd.to_timedelta(laps["time"], errors="coerce").dt.total_seconds()
+
+    # OpenF1 keys on the car number actually raced. Jolpica gives that as
+    # `number`; `driverNumber` is the permanent number and differs for the
+    # reigning champion running #1, so prefer `number` and fall back.
+    number_to_driver = {}
+    for _, row in results.iterrows():
+        for col in ("number", "driverNumber"):
+            val = row.get(col)
+            if pd.notna(val):
+                number_to_driver.setdefault(int(val), row["driverId"])
+
+    race_date = results.iloc[0].get("raceDate")
+    stints = fetch_openf1_stints(year, race_date, number_to_driver)
+
+    return results, laps, pits, stints, meta
+
+
 # ---------------------------------------------------------------- charts
 
 
-def chart_tyre_strategy(session, path):
-    laps = session.laps
-    order = [
-        session.get_driver(d)["Abbreviation"]
-        for d in session.drivers
-    ]
+def chart_stints(results, laps, pits, stints, meta, path, title=""):
+    """Stint lengths per driver.
 
-    stints = (
-        laps[["Driver", "Stint", "Compound", "LapNumber"]]
-        .groupby(["Driver", "Stint", "Compound"])
-        .count()
-        .reset_index()
-        .rename(columns={"LapNumber": "StintLength"})
-    )
+    Coloured by tyre compound when OpenF1 supplied them, otherwise by stint
+    number using pit stop laps from Jolpica.
+    """
+    use_compounds = stints is not None and not stints.empty
+    if not use_compounds and pits.empty:
+        raise ValueError("neither compound nor pit stop data available")
+
+    total_laps = int(results["laps"].max())
+    order = [row["driverId"] for _, row in results.iterrows()]
 
     fig, ax = plt.subplots(figsize=(9, 10))
-    for abb in order:
-        previous = 0
-        for _, row in stints[stints["Driver"] == abb].iterrows():
-            ax.barh(
-                y=abb,
-                width=row["StintLength"],
-                left=previous,
-                color=compound_color(row["Compound"], session),
-                edgecolor="black",
-                linewidth=0.6,
-            )
-            previous += row["StintLength"]
+    style_axes(ax)
+    seen_compounds = []
 
-    ax.set_title(f"{session.event['EventName']} {session.event.year} - tyre strategy")
+    for drv in order:
+        code = meta[drv]["code"]
+        finished = results.loc[results["driverId"] == drv, "laps"]
+        last_lap = int(finished.iloc[0]) if len(finished) else total_laps
+
+        if use_compounds:
+            rows = stints[stints["driverId"] == drv]
+            if rows.empty:
+                continue
+            for _, st in rows.iterrows():
+                start = int(st.get("lap_start") or 1)
+                end = st.get("lap_end")
+                end = int(end) if pd.notna(end) else last_lap
+                width = end - start + 1
+                if width <= 0:
+                    continue
+                comp = st["compound"]
+                if comp not in seen_compounds:
+                    seen_compounds.append(comp)
+                ax.barh(
+                    y=code, width=width, left=start - 1,
+                    color=COMPOUND_COLORS.get(comp, COMPOUND_COLORS["UNKNOWN"]),
+                    edgecolor="#1e1e1e", linewidth=0.8,
+                )
+        else:
+            stop_laps = sorted(pits.loc[pits["driverId"] == drv, "lap"].astype(int).tolist())
+            bounds = [0] + stop_laps + [last_lap]
+            for i in range(len(bounds) - 1):
+                width = bounds[i + 1] - bounds[i]
+                if width <= 0:
+                    continue
+                ax.barh(
+                    y=code, width=width, left=bounds[i],
+                    color=STINT_SHADES[i % len(STINT_SHADES)],
+                    edgecolor="#1e1e1e", linewidth=0.8,
+                )
+
+    ax.set_title(title)
     ax.set_xlabel("Lap")
+    ax.set_xlim(0, total_laps)
     ax.invert_yaxis()
     ax.grid(False)
-    for spine in ("top", "right", "left"):
-        ax.spines[spine].set_visible(False)
+
+    if use_compounds:
+        keys = [c for c in ("SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET")
+                if c in seen_compounds]
+        labels = [c.title() for c in keys]
+        colors = [COMPOUND_COLORS[c] for c in keys]
+    else:
+        labels = [f"Stint {i + 1}" for i in range(3)]
+        colors = [STINT_SHADES[i % len(STINT_SHADES)] for i in range(3)]
+
+    if labels:
+        handles = [plt.Rectangle((0, 0), 1, 1, color=c) for c in colors]
+        ax.legend(handles, labels, loc="lower right", facecolor="#2a2a2a",
+                  labelcolor="#dddddd", fontsize="small")
+
     fig.tight_layout()
-    fig.savefig(path, dpi=140)
+    fig.savefig(path, dpi=140, facecolor=fig.get_facecolor())
     plt.close(fig)
 
 
-def chart_race_pace(session, path, n=10):
-    top = session.drivers[:n]
-    laps = session.laps.pick_drivers(top).pick_quicklaps().reset_index()
+def chart_race_pace(results, laps, pits, stints, meta, path, title="", n=10):
     if laps.empty:
-        raise ValueError("no quick laps available")
+        raise ValueError("no lap time data available")
 
-    laps["Seconds"] = laps["LapTime"].dt.total_seconds()
-    order = [session.get_driver(d)["Abbreviation"] for d in top]
+    top = results.head(n)["driverId"].tolist()
+    subset = laps[laps["driverId"].isin(top)].dropna(subset=["seconds"])
+    if subset.empty:
+        raise ValueError("no usable lap times")
+
+    # drop in-laps and out-laps, which are pit-affected rather than pace
+    if not pits.empty:
+        bad = set()
+        for _, stop in pits.iterrows():
+            bad.add((stop["driverId"], int(stop["lap"])))
+            bad.add((stop["driverId"], int(stop["lap"]) + 1))
+        keys = list(zip(subset["driverId"], subset["number"].astype(int)))
+        subset = subset[[k not in bad for k in keys]]
+
+    # drop safety car and damaged laps
+    cutoff = subset["seconds"].min() * QUICKLAP_THRESHOLD
+    subset = subset[subset["seconds"] <= cutoff]
 
     data, colors, labels = [], [], []
-    for abb in order:
-        vals = laps.loc[laps["Driver"] == abb, "Seconds"].dropna()
+    for drv in top:
+        vals = subset.loc[subset["driverId"] == drv, "seconds"]
         if len(vals) < 3:
             continue
         data.append(vals.values)
-        colors.append(driver_color(abb, session))
-        labels.append(abb)
+        colors.append(meta[drv]["color"])
+        labels.append(meta[drv]["code"])
+
+    if not data:
+        raise ValueError("not enough clean laps to plot")
 
     fig, ax = plt.subplots(figsize=(11, 6))
+    style_axes(ax)
     try:
-        # matplotlib >= 3.9
         bp = ax.boxplot(data, tick_labels=labels, patch_artist=True, showfliers=False)
-    except TypeError:
+    except TypeError:  # matplotlib < 3.9
         bp = ax.boxplot(data, labels=labels, patch_artist=True, showfliers=False)
+
     for patch, color in zip(bp["boxes"], colors):
         patch.set_facecolor(color)
-        patch.set_alpha(0.75)
+        patch.set_alpha(0.8)
+    for part in ("whiskers", "caps"):
+        for item in bp[part]:
+            item.set_color("#999999")
     for median in bp["medians"]:
-        median.set_color("white")
+        median.set_color("#ffffff")
         median.set_linewidth(1.6)
 
-    ax.set_title(f"{session.event['EventName']} {session.event.year} - race pace (top {n})")
+    ax.set_title(title)
     ax.set_ylabel("Lap time (s)")
-    ax.grid(axis="y", alpha=0.25)
+    ax.grid(axis="y", alpha=0.2, color="#666666")
     fig.tight_layout()
-    fig.savefig(path, dpi=140)
+    fig.savefig(path, dpi=140, facecolor=fig.get_facecolor())
     plt.close(fig)
 
 
-def chart_position_changes(session, path):
-    fig, ax = plt.subplots(figsize=(11, 6.5))
+def chart_position_changes(results, laps, pits, stints, meta, path, title=""):
+    if laps.empty or "position" not in laps.columns:
+        raise ValueError("no per-lap position data available")
 
-    for drv in session.drivers:
-        drv_laps = session.laps.pick_drivers(drv)
-        if drv_laps.empty:
+    fig, ax = plt.subplots(figsize=(11, 6.5))
+    style_axes(ax)
+
+    for drv, group in laps.groupby("driverId"):
+        if drv not in meta:
             continue
-        abb = drv_laps["Driver"].iloc[0]
+        group = group.sort_values("number")
         ax.plot(
-            drv_laps["LapNumber"],
-            drv_laps["Position"],
-            label=abb,
-            color=driver_color(abb, session),
+            group["number"],
+            group["position"],
+            label=meta[drv]["code"],
+            color=meta[drv]["color"],
+            linestyle=meta[drv].get("linestyle", "-"),
             linewidth=1.6,
         )
 
-    ax.set_ylim([20.5, 0.5])
+    n_drivers = max(len(meta), 20)
+    ax.set_ylim([n_drivers + 0.5, 0.5])
     ax.set_yticks([1, 5, 10, 15, 20])
+    ax.set_title(title)
     ax.set_xlabel("Lap")
     ax.set_ylabel("Position")
-    ax.set_title(f"{session.event['EventName']} {session.event.year} - position changes")
-    ax.legend(bbox_to_anchor=(1.01, 1.0), loc="upper left", fontsize="small")
-    ax.grid(alpha=0.2)
+    ax.legend(
+        bbox_to_anchor=(1.01, 1.0), loc="upper left", fontsize="small",
+        facecolor="#2a2a2a", labelcolor="#dddddd",
+    )
+    ax.grid(alpha=0.15, color="#666666")
     fig.tight_layout()
-    fig.savefig(path, dpi=140)
+    fig.savefig(path, dpi=140, facecolor=fig.get_facecolor())
     plt.close(fig)
 
 
@@ -212,74 +459,82 @@ def chart_position_changes(session, path):
 
 
 def fmt_laptime(td):
-    if pd.isna(td):
+    if td is None or pd.isna(td):
         return "n/a"
-    total = td.total_seconds()
+    total = pd.to_timedelta(td).total_seconds()
     return f"{int(total // 60)}:{total % 60:06.3f}"
 
 
-def build_caption(session):
-    results = session.results
-    event = session.event
-    lines = [f"## {event['EventName']} {event.year} - race report", ""]
+def build_caption(results, laps, pits, stints, meta, year, race_name):
+    lines = [f"## {race_name} {year} - race report", ""]
 
-    # podium
     try:
-        podium = results.sort_values("Position").head(3)
-        placings = ["🥇", "🥈", "🥉"]
-        for medal, (_, row) in zip(placings, podium.iterrows()):
-            lines.append(f"{medal} **{row['Abbreviation']}** ({row['TeamName']})")
+        for medal, (_, row) in zip(["🥇", "🥈", "🥉"], results.head(3).iterrows()):
+            lines.append(
+                f"{medal} **{meta[row['driverId']]['code']}** ({row.get('constructorName', '')})"
+            )
         lines.append("")
     except Exception as exc:
         print(f"podium failed: {exc}")
 
-    # fastest lap
     try:
-        fastest = session.laps.pick_fastest()
-        lines.append(
-            f"**Fastest lap** {fastest['Driver']} "
-            f"{fmt_laptime(fastest['LapTime'])} on lap {int(fastest['LapNumber'])}"
-        )
+        fl = results[results.get("fastestLapRank") == 1]
+        if len(fl):
+            row = fl.iloc[0]
+            lines.append(
+                f"**Fastest lap** {meta[row['driverId']]['code']} "
+                f"{fmt_laptime(row.get('fastestLapTime'))} "
+                f"on lap {int(row.get('fastestLapNumber'))}"
+            )
     except Exception as exc:
         print(f"fastest lap failed: {exc}")
 
-    # biggest gainer
     try:
         r = results.copy()
-        r = r[(r["GridPosition"] > 0) & r["Position"].notna()]
-        r["Gained"] = r["GridPosition"] - r["Position"]
-        best = r.sort_values("Gained", ascending=False).iloc[0]
-        if best["Gained"] > 0:
+        r = r[(r["grid"] > 0) & r["position"].notna()]
+        r["gained"] = r["grid"] - r["position"]
+        best = r.sort_values("gained", ascending=False).iloc[0]
+        if best["gained"] > 0:
             lines.append(
-                f"**Biggest gain** {best['Abbreviation']} "
-                f"P{int(best['GridPosition'])} to P{int(best['Position'])} "
-                f"(+{int(best['Gained'])})"
+                f"**Biggest gain** {meta[best['driverId']]['code']} "
+                f"P{int(best['grid'])} to P{int(best['position'])} "
+                f"(+{int(best['gained'])})"
             )
     except Exception as exc:
         print(f"gainer failed: {exc}")
 
-    # winner's strategy
     try:
-        winner = results.sort_values("Position").iloc[0]["Abbreviation"]
-        stints = (
-            session.laps.pick_drivers(winner)[["Stint", "Compound", "LapNumber"]]
-            .groupby(["Stint", "Compound"])
-            .count()
-            .reset_index()
-        )
-        strategy = " → ".join(
-            f"{row['Compound'].title()} ({int(row['LapNumber'])})"
-            for _, row in stints.iterrows()
-        )
-        lines.append(f"**Winning strategy** {strategy}")
+        winner = results.iloc[0]
+        last = int(winner["laps"])
+        won = stints[stints["driverId"] == winner["driverId"]] if stints is not None else None
+
+        if won is not None and not won.empty:
+            parts = []
+            for _, st in won.iterrows():
+                start = int(st.get("lap_start") or 1)
+                end = st.get("lap_end")
+                end = int(end) if pd.notna(end) else last
+                parts.append(f"{st['compound'].title()} ({end - start + 1})")
+            n_stops = max(len(parts) - 1, 0)
+            label = "stop" if n_stops == 1 else "stops"
+            lines.append(
+                f"**Winning strategy** {n_stops}-{label}, " + " → ".join(parts)
+            )
+        else:
+            stops = sorted(pits.loc[pits["driverId"] == winner["driverId"], "lap"].astype(int))
+            bounds = [0] + stops + [last]
+            lengths = [bounds[i + 1] - bounds[i] for i in range(len(bounds) - 1)]
+            plan = " → ".join(str(x) for x in lengths if x > 0)
+            label = "stop" if len(stops) == 1 else "stops"
+            lines.append(f"**Winning strategy** {len(stops)}-{label}, stints of {plan} laps")
     except Exception as exc:
         print(f"strategy failed: {exc}")
 
     lines.append("")
-    lines.append("Data via FastF1. Argue about it below.")
+    source = "Jolpica-F1 and OpenF1" if stints is not None else "Jolpica-F1"
+    lines.append(f"Data via {source}. Argue about it below.")
 
-    caption = "\n".join(lines)
-    return caption[:1990]
+    return "\n".join(lines)[:1990]
 
 
 # ---------------------------------------------------------------- posting
@@ -293,10 +548,11 @@ def post_to_discord(webhook_url, caption, image_paths):
             handles.append(fh)
             files[f"files[{i}]"] = (Path(path).name, fh, "image/png")
 
-        payload = {"content": caption, "username": WEBHOOK_USERNAME}
         resp = requests.post(
             webhook_url,
-            data={"payload_json": json.dumps(payload)},
+            data={"payload_json": json.dumps(
+                {"content": caption, "username": WEBHOOK_USERNAME}
+            )},
             files=files,
             timeout=60,
         )
@@ -320,39 +576,45 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    setup()
+    OUT_DIR.mkdir(exist_ok=True)
+    # FastF1 auto-enables a default cache and warns about it; set it explicitly
+    # instead. Also gives FastF1's built-in rate limiting somewhere to live.
+    CACHE_DIR.mkdir(exist_ok=True)
+    Cache.enable_cache(str(CACHE_DIR))
+    ergast = Ergast(result_type="pandas", auto_cast=True)
 
     if args.year and args.round:
-        year, rnd, name = args.year, args.round, None
+        year, rnd, race_name = args.year, args.round, None
     else:
-        found = find_recent_race()
+        found = find_recent_race(ergast)
         if not found:
             print("no race finished in the lookback window, nothing to do")
             return 0
-        year, rnd, name = found
+        year, rnd, race_name = found
 
-    print(f"loading {year} round {rnd} {name or ''}")
-    session = fastf1.get_session(year, rnd, "R")
-    # telemetry is heavy and none of these charts need it
-    session.load(telemetry=False, weather=False, messages=False)
+    print(f"loading {year} round {rnd} {race_name or ''}")
+    results, laps, pits, stints, meta = load_race(ergast, year, rnd)
+    if race_name is None:
+        race_name = results.iloc[0].get("raceName", f"Round {rnd}")
+    print(f"{len(results)} results, {len(laps)} lap records, {len(pits)} pit stops")
 
     charts = [
-        ("tyre_strategy.png", chart_tyre_strategy),
-        ("race_pace.png", chart_race_pace),
-        ("position_changes.png", chart_position_changes),
+        ("stint_strategy.png", chart_stints, f"{race_name} {year} - tyre strategy"),
+        ("race_pace.png", chart_race_pace, f"{race_name} {year} - race pace (top 10)"),
+        ("position_changes.png", chart_position_changes, f"{race_name} {year} - position changes"),
     ]
 
     made = []
-    for filename, fn in charts:
+    for filename, fn, title in charts:
         path = OUT_DIR / filename
         try:
-            fn(session, path)
+            fn(results, laps, pits, stints, meta, path, title=title)
             made.append(path)
             print(f"built {filename}")
         except Exception as exc:
-            print(f"skipping {filename}: {exc}")
+            print(f"skipping {filename}: {type(exc).__name__}: {exc}")
 
-    caption = build_caption(session)
+    caption = build_caption(results, laps, pits, stints, meta, year, race_name)
     print("\n--- caption ---")
     print(caption)
     print("--- end ---\n")
