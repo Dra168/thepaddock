@@ -155,7 +155,6 @@ def build_caption(df, laps, meta, sess):
         lines.append(f"**Did not finish** {', '.join(out)}")
 
     lines.append("")
-    lines.append("Data via OpenF1. Argue about it below.")
     return "\n".join(lines)
 
 
