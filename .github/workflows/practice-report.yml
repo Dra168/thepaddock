@@ -2,8 +2,15 @@ name: Practice Report
 
 on:
   schedule:
-    # Friday 21:00 UTC / Saturday 05:00 HK. After FP2 on a normal weekend.
+    # Two runs, one per practice day. The 22h default lookback is narrow enough
+    # that the Saturday run cannot reach back into Friday's sessions.
+    #
+    #   Friday 21:00 UTC / Saturday 05:00 HK -- FP1 + FP2, or FP1 alone on a
+    #   sprint weekend, in one post.
     - cron: "0 21 * * 5"
+    #   Saturday 17:00 UTC / Sunday 01:00 HK -- FP3. On a sprint weekend there
+    #   is no FP3, so this run finds nothing and exits quietly.
+    - cron: "0 17 * * 6"
   workflow_dispatch:
     inputs:
       year:
@@ -13,7 +20,7 @@ on:
         description: "Country, circuit or location, e.g. Hungary (leave blank to auto-detect)"
         required: false
       lookback:
-        description: "Hours to look back when auto-detecting (default 96)"
+        description: "Hours to look back when auto-detecting (default 22)"
         required: false
       dry_run:
         description: "Build charts without posting"
@@ -41,7 +48,6 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           ARGS=""
-          ARGS="$ARGS --session "Practice 2""
           if [ -n "${{ github.event.inputs.year }}" ]; then
             ARGS="$ARGS --year ${{ github.event.inputs.year }}"
           fi
@@ -60,7 +66,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: practice-report-charts
+          name: practice-charts
           path: out/
           if-no-files-found: ignore
           retention-days: 14
