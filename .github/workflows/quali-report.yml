@@ -2,7 +2,7 @@ name: Qualifying Report
 
 on:
   schedule:
-    # Saturday 20:00 UTC / Sunday 04:00 HK. After every European and most other qualifying sessions.
+    # Saturday 20:00 UTC / Sunday 04:00 HK.
     - cron: "0 20 * * 6"
   workflow_dispatch:
     inputs:
@@ -39,28 +39,36 @@ jobs:
       - name: Build and post qualifying report
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Inputs come in as environment variables rather than being pasted
+          # into the script text. Nothing is quoted into a string and nothing
+          # is eval'd, so values containing spaces (Sprint Qualifying, Las
+          # Vegas) cannot break the command.
+          IN_YEAR: ${{ github.event.inputs.year }}
+          IN_ROUND: ${{ github.event.inputs.round }}
+          IN_LOOKBACK: ${{ github.event.inputs.lookback }}
+          IN_DRY: ${{ github.event.inputs.dry_run }}
         run: |
-          ARGS=""
-          ARGS="$ARGS --session "Qualifying""
-          if [ -n "${{ github.event.inputs.year }}" ]; then
-            ARGS="$ARGS --year ${{ github.event.inputs.year }}"
+          ARGS=(--session "Qualifying")
+          if [ -n "$IN_YEAR" ]; then
+            ARGS+=(--year "$IN_YEAR")
           fi
-          if [ -n "${{ github.event.inputs.round }}" ]; then
-            ARGS="$ARGS --round '${{ github.event.inputs.round }}'"
+          if [ -n "$IN_ROUND" ]; then
+            ARGS+=(--round "$IN_ROUND")
           fi
-          if [ -n "${{ github.event.inputs.lookback }}" ]; then
-            ARGS="$ARGS --lookback ${{ github.event.inputs.lookback }}"
+          if [ -n "$IN_LOOKBACK" ]; then
+            ARGS+=(--lookback "$IN_LOOKBACK")
           fi
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            ARGS="$ARGS --dry-run"
+          if [ "$IN_DRY" = "true" ]; then
+            ARGS+=(--dry-run)
           fi
-          eval python quali_report.py $ARGS
+          echo "running: quali_report.py ${ARGS[@]}"
+          python quali_report.py "${ARGS[@]}"
 
       - name: Upload charts as artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qualifying-report-charts
+          name: qualifying-charts
           path: out/
           if-no-files-found: ignore
           retention-days: 14
