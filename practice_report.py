@@ -211,7 +211,6 @@ def build_caption(blocks, meeting, long_run_session):
         lines.append(f"**Most laps** {totals.index[0]} ({int(totals.iloc[0])})")
 
     lines.append("")
-    lines.append("One-lap pace is the timesheet; long runs are the real story. ")
     return "\n".join(lines)
 
 
