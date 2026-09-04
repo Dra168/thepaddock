@@ -1,9 +1,7 @@
 import argparse
 import sys
-
 import matplotlib.pyplot as plt
 import pandas as pd
-
 import common as c
 
 PRACTICE_NAMES = ["Practice 1", "Practice 2", "Practice 3"]
