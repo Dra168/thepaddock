@@ -1,23 +1,3 @@
-"""
-The Paddock - race report bot (Jolpica edition)
-
-Pulls the most recent F1 race and posts three charts plus a writeup to a Discord
-webhook.
-
-Results, lap times and pit stops come from the Jolpica-F1 API (the successor to
-Ergast) through fastf1.ergast. Tyre compounds come from OpenF1. Nothing touches
-F1's livetiming API, which does not serve datacenter IP ranges and therefore
-fails on GitHub Actions runners.
-
-If OpenF1 is unreachable the strategy chart falls back to pit-stop-derived
-stints coloured by stint number, so a failure there costs colour, not the post.
-
-Usage:
-    python race_report.py                          # most recent finished race
-    python race_report.py --year 2025 --round 14
-    python race_report.py --year 2025 --round 14 --dry-run
-"""
-
 import argparse
 import json
 import os
@@ -38,12 +18,9 @@ CACHE_DIR = Path("cache")
 OUT_DIR = Path("out")
 LOOKBACK_HOURS = 96
 WEBHOOK_USERNAME = "The Paddock"
-PAGE_SIZE = 1000          # Jolpica's maximum per request
-QUICKLAP_THRESHOLD = 1.07  # keep laps within 107% of the fastest lap
+PAGE_SIZE = 1000         
+QUICKLAP_THRESHOLD = 1.07  
 
-# Constructor colours. Jolpica gives constructorId, not a colour, so this is
-# ours to maintain. Unknown IDs fall back to the palette below, so a new team
-# still plots, just not in its own colour.
 TEAM_COLORS = {
     "red_bull": "#3671C6",
     "ferrari": "#E8002D",
@@ -68,7 +45,6 @@ FALLBACK_COLORS = [
 ]
 STINT_SHADES = ["#E8002D", "#F5A623", "#4A90D9", "#7FB069", "#B5838D", "#9C89B8"]
 
-# OpenF1 supplies tyre compounds, which Jolpica does not carry. Data from 2023 on.
 OPENF1_BASE = "https://api.openf1.org/v1"
 OPENF1_TIMEOUT = 20
 COMPOUND_COLORS = {
@@ -79,10 +55,6 @@ COMPOUND_COLORS = {
     "WET": "#0067AD",
     "UNKNOWN": "#888888",
 }
-
-
-# ---------------------------------------------------------------- plumbing
-
 
 def style_axes(ax):
     ax.set_facecolor("#1e1e1e")
@@ -104,10 +76,6 @@ def fetch_all_pages(fn, **kwargs):
     resp = fn(limit=PAGE_SIZE, **kwargs)
     frames = list(resp.content)
 
-    # Don't use `is_complete` to drive this loop: it returns False for any page
-    # with a non-zero offset, so it stays False forever once you've paged once.
-    # `get_next_result_page` applies the correct test (offset + limit >= total)
-    # and raises ValueError when there is nothing left, so let it be the signal.
     for _ in range(20):
         try:
             resp = resp.get_next_result_page()
@@ -119,15 +87,10 @@ def fetch_all_pages(fn, **kwargs):
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
 
-
 def team_color(constructor_id, index=0):
     if constructor_id in TEAM_COLORS:
         return TEAM_COLORS[constructor_id]
     return FALLBACK_COLORS[index % len(FALLBACK_COLORS)]
-
-
-# ---------------------------------------------------------------- data
-
 
 def find_recent_race(ergast, lookback_hours=LOOKBACK_HOURS):
     """Return (year, round) for the most recent race that has finished."""
@@ -151,7 +114,6 @@ def find_recent_race(ergast, lookback_hours=LOOKBACK_HOURS):
             when = when.tz_localize("UTC") if when.tzinfo is None else when
 
             age = now - when
-            # race must be over (allow ~3h of running) and inside the window
             if timedelta(hours=3) < age < timedelta(hours=lookback_hours):
                 found = (year, int(race["round"]), race["raceName"])
 
@@ -162,12 +124,6 @@ def find_recent_race(ergast, lookback_hours=LOOKBACK_HOURS):
 
 
 def fetch_race_meta(ergast, year, rnd):
-    """Return (raceName, raceDate) for a round.
-
-    These live in an ErgastMultiResponse's `.description`, not its `.content`,
-    and `fetch_all_pages` only concatenates `.content`. So ask the schedule
-    endpoint directly rather than looking for them on the results frame.
-    """
     try:
         sched = ergast.get_race_schedule(season=year, round=rnd, limit=100)
         if len(sched):
@@ -179,13 +135,6 @@ def fetch_race_meta(ergast, year, rnd):
 
 
 def fetch_openf1_stints(year, race_date, number_to_driver):
-    """Fetch tyre stints from OpenF1 and key them by Jolpica driverId.
-
-    Returns a DataFrame with driverId, stint_number, compound, lap_start,
-    lap_end, tyre_age_at_start, or None if anything goes wrong. Every caller
-    must handle None: OpenF1 is a second upstream and a nice-to-have, not a
-    dependency the report is allowed to die on.
-    """
     if race_date is None or pd.isna(race_date):
         print("openf1: no race date to match on, skipping compounds")
         return None
@@ -203,7 +152,6 @@ def fetch_openf1_stints(year, race_date, number_to_driver):
         print(f"openf1: session lookup failed ({exc}), falling back to stint numbers")
         return None
 
-    # match the OpenF1 session to the Jolpica round by date
     session_key = None
     for sess in sessions:
         start = sess.get("date_start")
@@ -247,8 +195,6 @@ def fetch_openf1_stints(year, race_date, number_to_driver):
         stints.get("compound", pd.Series(dtype=str))
         .fillna("UNKNOWN").astype(str).str.upper()
     )
-    # Duplicate (driver, stint) records would draw stacked bars on one row and
-    # look like phantom stops, so drop them and say so.
     before = len(stints)
     stints = stints.drop_duplicates(subset=["driverId", "stint_number"], keep="first")
     if len(stints) != before:
@@ -276,7 +222,6 @@ def load_race(ergast, year, rnd):
 
     results = results.sort_values("position").reset_index(drop=True)
 
-    # driverId is the only key lap times carry, so map it to everything else
     meta = {}
     seen_team = {}
     for i, row in results.iterrows():
@@ -300,11 +245,6 @@ def load_race(ergast, year, rnd):
         laps["code"] = laps["driverId"].map(lambda d: meta.get(d, {}).get("code", d))
         laps["seconds"] = pd.to_timedelta(laps["time"], errors="coerce").dt.total_seconds()
 
-    # OpenF1 keys on the car number actually raced. Jolpica gives that as
-    # `number`; `driverNumber` is the permanent number. Register ONE number per
-    # driver: registering both would alias a second number onto the same driver,
-    # and any OpenF1 record carrying that number would then be drawn on the
-    # wrong row, silently stacking two drivers' stints on top of each other.
     number_to_driver = {}
     for _, row in results.iterrows():
         val = row.get("number")
@@ -317,10 +257,6 @@ def load_race(ergast, year, rnd):
     stints = fetch_openf1_stints(year, race_date, number_to_driver)
 
     return results, laps, pits, stints, meta, race_name
-
-
-# ---------------------------------------------------------------- charts
-
 
 def chart_stints(results, laps, pits, stints, meta, path, title=""):
     """Stint lengths per driver.
@@ -355,7 +291,7 @@ def chart_stints(results, laps, pits, stints, meta, path, title=""):
             for _, st in rows.iterrows():
                 start = st.get("lap_start")
                 if pd.isna(start):
-                    continue  # no start lap means nothing sensible to draw
+                    continue  
                 start = int(start)
                 end = st.get("lap_end")
                 end = int(end) if pd.notna(end) else last_lap
@@ -407,7 +343,6 @@ def chart_stints(results, laps, pits, stints, meta, path, title=""):
     fig.savefig(path, dpi=140, facecolor=fig.get_facecolor())
     plt.close(fig)
 
-
 def chart_race_pace(results, laps, pits, stints, meta, path, title="", n=10):
     if laps.empty:
         raise ValueError("no lap time data available")
@@ -417,7 +352,6 @@ def chart_race_pace(results, laps, pits, stints, meta, path, title="", n=10):
     if subset.empty:
         raise ValueError("no usable lap times")
 
-    # drop in-laps and out-laps, which are pit-affected rather than pace
     if not pits.empty:
         bad = set()
         for _, stop in pits.iterrows():
@@ -446,7 +380,7 @@ def chart_race_pace(results, laps, pits, stints, meta, path, title="", n=10):
     style_axes(ax)
     try:
         bp = ax.boxplot(data, tick_labels=labels, patch_artist=True, showfliers=False)
-    except TypeError:  # matplotlib < 3.9
+    except TypeError:
         bp = ax.boxplot(data, labels=labels, patch_artist=True, showfliers=False)
 
     for patch, color in zip(bp["boxes"], colors):
@@ -471,10 +405,6 @@ def chart_position_changes(results, laps, pits, stints, meta, path, title=""):
     if laps.empty or "position" not in laps.columns:
         raise ValueError("no per-lap position data available")
 
-    # Lap times start at lap 1, so without this the chart opens after the first
-    # lap is already run and the start itself is invisible. Grid slots come from
-    # the results frame. Ergast uses grid 0 for a pit lane start, which has no
-    # grid slot to plot, so those lines simply begin at lap 1.
     grid = {}
     for _, row in results.iterrows():
         g = row.get("grid")
@@ -520,10 +450,6 @@ def chart_position_changes(results, laps, pits, stints, meta, path, title=""):
     fig.tight_layout()
     fig.savefig(path, dpi=140, facecolor=fig.get_facecolor())
     plt.close(fig)
-
-
-# ---------------------------------------------------------------- caption
-
 
 def fmt_laptime(td):
     if td is None or pd.isna(td):
@@ -605,10 +531,6 @@ def build_caption(results, laps, pits, stints, meta, year, race_name):
 
     return "\n".join(lines)[:1990]
 
-
-# ---------------------------------------------------------------- posting
-
-
 def post_to_discord(webhook_url, caption, image_paths):
     files, handles = {}, []
     try:
@@ -634,10 +556,6 @@ def post_to_discord(webhook_url, caption, image_paths):
         for fh in handles:
             fh.close()
 
-
-# ---------------------------------------------------------------- main
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--year", type=int)
@@ -646,8 +564,6 @@ def main():
     args = parser.parse_args()
 
     OUT_DIR.mkdir(exist_ok=True)
-    # FastF1 auto-enables a default cache and warns about it; set it explicitly
-    # instead. Also gives FastF1's built-in rate limiting somewhere to live.
     CACHE_DIR.mkdir(exist_ok=True)
     Cache.enable_cache(str(CACHE_DIR))
     ergast = Ergast(result_type="pandas", auto_cast=True)
