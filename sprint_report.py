@@ -1,27 +1,10 @@
-"""
-The Paddock - sprint race report.
-
-Same shape as the Grand Prix report, but built entirely on OpenF1 rather than
-Jolpica, because sprint sessions are easier to reach there and the driver
-colours come free.
-
-Sprints are short and usually one-stint, so there is no strategy chart. What
-matters is the start, the pace order, and who actually gained anything.
-
-    python sprint_report.py --dry-run
-    python sprint_report.py --year 2025 --round Belgium
-"""
-
 import argparse
 import sys
-
 import matplotlib.pyplot as plt
 import pandas as pd
-
 import common as c
 
 QUICKLAP_THRESHOLD = 1.07
-
 
 def classify(results, meta, grid):
     rows = []
@@ -47,14 +30,13 @@ def classify(results, meta, grid):
         return df
     return df.sort_values("position", na_position="last").reset_index(drop=True)
 
-
 def chart_pace(laps, df, meta, title, n=10):
     def draw(path):
         if laps.empty:
             raise ValueError("no lap data available")
         clean = laps.dropna(subset=["seconds"]).copy()
         if "is_pit_out_lap" in clean.columns:
-            clean = clean[clean["is_pit_out_lap"] != True]  # noqa: E712
+            clean = clean[clean["is_pit_out_lap"] != True] 
         if clean.empty:
             raise ValueError("no clean laps")
         cutoff = clean["seconds"].min() * QUICKLAP_THRESHOLD
@@ -93,7 +75,6 @@ def chart_pace(laps, df, meta, title, n=10):
         c.save(fig, path)
     return draw
 
-
 def chart_grid_vs_finish(df, title):
     """A sprint is decided at the start, so plot grid slot against finish."""
     def draw(path):
@@ -121,7 +102,6 @@ def chart_grid_vs_finish(df, title):
         ax.grid(axis="y", alpha=0.15, color="#666666")
         c.save(fig, path)
     return draw
-
 
 def build_caption(df, laps, meta, sess):
     where = sess.get("country_name") or sess.get("circuit_short_name") or ""
@@ -156,7 +136,6 @@ def build_caption(df, laps, meta, sess):
 
     lines.append("")
     return "\n".join(lines)
-
 
 def main():
     parser = argparse.ArgumentParser()
