@@ -1,13 +1,3 @@
-"""
-The Paddock - race report bot
-Pulls the most recent F1 race with FastF1, builds charts, posts to a Discord webhook.
-
-Usage:
-    python race_report.py                  # find the most recent race automatically
-    python race_report.py --year 2025 --round 14
-    python race_report.py --year 2025 --round 14 --dry-run   # build charts, don't post
-"""
-
 import argparse
 import json
 import os
@@ -16,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import matplotlib
-matplotlib.use("Agg")  # no display on a CI runner
+matplotlib.use("Agg") 
 import matplotlib.pyplot as plt
 import pandas as pd
 import requests
@@ -26,13 +16,9 @@ import fastf1.plotting
 
 CACHE_DIR = Path("cache")
 OUT_DIR = Path("out")
-LOOKBACK_HOURS = 96          # how far back to search for a finished race
+LOOKBACK_HOURS = 96        
 WEBHOOK_USERNAME = "The Paddock"
 GREY = "#888888"
-
-
-# ---------------------------------------------------------------- setup
-
 
 def setup():
     CACHE_DIR.mkdir(exist_ok=True)
@@ -44,7 +30,6 @@ def setup():
             color_scheme="fastf1",
         )
     except TypeError:
-        # signature changed, fall back to defaults
         fastf1.plotting.setup_mpl()
 
 
@@ -60,10 +45,6 @@ def compound_color(compound, session):
         return fastf1.plotting.get_compound_color(compound, session=session)
     except Exception:
         return GREY
-
-
-# ---------------------------------------------------------------- finding the race
-
 
 def find_recent_race(lookback_hours=LOOKBACK_HOURS):
     """Return (year, round_number) for the most recent race that has finished."""
@@ -88,7 +69,6 @@ def find_recent_race(lookback_hours=LOOKBACK_HOURS):
                 race_date = race_date.tz_localize("UTC")
 
             age = now - race_date
-            # race must be over (allow ~3h of running) and inside the window
             if timedelta(hours=3) < age < timedelta(hours=lookback_hours):
                 found = (year, int(event["RoundNumber"]), event["EventName"])
 
@@ -96,10 +76,6 @@ def find_recent_race(lookback_hours=LOOKBACK_HOURS):
             break
 
     return found
-
-
-# ---------------------------------------------------------------- charts
-
 
 def chart_tyre_strategy(session, path):
     laps = session.laps
@@ -161,7 +137,6 @@ def chart_race_pace(session, path, n=10):
 
     fig, ax = plt.subplots(figsize=(11, 6))
     try:
-        # matplotlib >= 3.9
         bp = ax.boxplot(data, tick_labels=labels, patch_artist=True, showfliers=False)
     except TypeError:
         bp = ax.boxplot(data, labels=labels, patch_artist=True, showfliers=False)
@@ -207,10 +182,6 @@ def chart_position_changes(session, path):
     fig.savefig(path, dpi=140)
     plt.close(fig)
 
-
-# ---------------------------------------------------------------- caption
-
-
 def fmt_laptime(td):
     if pd.isna(td):
         return "n/a"
@@ -223,7 +194,6 @@ def build_caption(session):
     event = session.event
     lines = [f"## {event['EventName']} {event.year} - race report", ""]
 
-    # podium
     try:
         podium = results.sort_values("Position").head(3)
         placings = ["🥇", "🥈", "🥉"]
@@ -233,7 +203,6 @@ def build_caption(session):
     except Exception as exc:
         print(f"podium failed: {exc}")
 
-    # fastest lap
     try:
         fastest = session.laps.pick_fastest()
         lines.append(
@@ -243,7 +212,6 @@ def build_caption(session):
     except Exception as exc:
         print(f"fastest lap failed: {exc}")
 
-    # biggest gainer
     try:
         r = results.copy()
         r = r[(r["GridPosition"] > 0) & r["Position"].notna()]
@@ -258,7 +226,6 @@ def build_caption(session):
     except Exception as exc:
         print(f"gainer failed: {exc}")
 
-    # winner's strategy
     try:
         winner = results.sort_values("Position").iloc[0]["Abbreviation"]
         stints = (
@@ -280,10 +247,6 @@ def build_caption(session):
 
     caption = "\n".join(lines)
     return caption[:1990]
-
-
-# ---------------------------------------------------------------- posting
-
 
 def post_to_discord(webhook_url, caption, image_paths):
     files, handles = {}, []
@@ -308,10 +271,6 @@ def post_to_discord(webhook_url, caption, image_paths):
     finally:
         for fh in handles:
             fh.close()
-
-
-# ---------------------------------------------------------------- main
-
 
 def main():
     parser = argparse.ArgumentParser()
