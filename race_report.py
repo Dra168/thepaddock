@@ -4,13 +4,11 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
 import matplotlib
-matplotlib.use("Agg")  # no display on a CI runner
+matplotlib.use("Agg") 
 import matplotlib.pyplot as plt
 import pandas as pd
 import requests
-
 from fastf1 import Cache
 from fastf1.ergast import Ergast
 
