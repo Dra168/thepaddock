@@ -1,14 +1,3 @@
-"""
-The Paddock - qualifying report.
-
-Handles both Qualifying and Sprint Qualifying, which are structurally identical:
-three knockout segments, so OpenF1 returns duration and gap_to_leader as
-three-element arrays.
-
-    python quali_report.py --dry-run
-    python quali_report.py --session "Sprint Qualifying" --year 2025 --round Belgium
-"""
-
 import argparse
 import sys
 
@@ -19,9 +8,7 @@ import common as c
 
 SEGMENTS = ["Q1", "Q2", "Q3"]
 
-
 def segment_labels(session_name):
-    """Sprint qualifying segments are SQ1/SQ2/SQ3 on the broadcast."""
     return ["SQ1", "SQ2", "SQ3"] if "Sprint" in session_name else SEGMENTS
 
 
@@ -79,8 +66,6 @@ def chart_gap_to_pole(df, labels, title):
 
 
 def chart_segments(df, labels, title):
-    """Each driver's time in every segment they reached, as gap to that
-    segment's fastest. Shows who found time when it mattered."""
     def draw(path):
         cols = ["q1", "q2", "q3"]
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -132,17 +117,14 @@ def build_caption(df, labels, sess):
                      f"{c.fmt_time(row['best'])}{gap}")
     lines.append("")
 
-    # margin between pole and P2
     if len(df) >= 2 and pd.notna(df.iloc[1]["gap"]):
         lines.append(f"**Pole margin** {df.iloc[1]['gap']:.3f}s")
 
-    # who went out where
     for seg, reached in ((labels[0], 1), (labels[1], 2)):
         out = df[df["reached"] == reached]["code"].tolist()
         if out:
             lines.append(f"**Out in {seg}** {', '.join(out)}")
 
-    # closest call: smallest gap between adjacent cars
     ranked = df.dropna(subset=["best"]).sort_values("best").reset_index(drop=True)
     if len(ranked) >= 2:
         diffs = ranked["best"].diff().iloc[1:]
