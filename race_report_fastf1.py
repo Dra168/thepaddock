@@ -4,13 +4,11 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
 import matplotlib
 matplotlib.use("Agg") 
 import matplotlib.pyplot as plt
 import pandas as pd
 import requests
-
 import fastf1
 import fastf1.plotting
 
