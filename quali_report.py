@@ -1,9 +1,7 @@
 import argparse
 import sys
-
 import matplotlib.pyplot as plt
 import pandas as pd
-
 import common as c
 
 SEGMENTS = ["Q1", "Q2", "Q3"]
