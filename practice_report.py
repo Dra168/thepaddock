@@ -1,27 +1,3 @@
-"""
-The Paddock - practice report.
-
-Posts one consolidated message per practice DAY rather than one per session,
-because the weekend format decides how many sessions there are:
-
-    Normal weekend    Friday: FP1 + FP2      Saturday: FP3
-    Sprint weekend    Friday: FP1 only       Saturday: nothing
-
-Both are handled by the same workflow running twice, with a lookback window
-narrow enough that the Saturday run cannot reach back into Friday. Nothing is
-configured per weekend format; the Saturday run on a sprint weekend simply
-finds no session and exits.
-
-Practice is not in Jolpica at all, so everything here comes from OpenF1.
-
-Practice is two different things at once: one-lap pace on low fuel and long-run
-pace on high fuel. The charts separate them, because the headline timesheet on
-its own is close to meaningless.
-
-    python practice_report.py --dry-run
-    python practice_report.py --year 2025 --round Hungary --dry-run
-"""
-
 import argparse
 import sys
 
@@ -32,16 +8,12 @@ import common as c
 
 PRACTICE_NAMES = ["Practice 1", "Practice 2", "Practice 3"]
 
-# A long run is a sequence of laps on the same tyre with no pit-out in between.
 MIN_RUN_LAPS = 4
-QUICKLAP_THRESHOLD = 1.10  # practice fuel loads vary far more than a race
-
+QUICKLAP_THRESHOLD = 1.10  
 
 def short_name(session_name):
-    """'Practice 2' -> 'FP2'"""
     digits = "".join(ch for ch in str(session_name) if ch.isdigit())
     return f"FP{digits}" if digits else str(session_name)
-
 
 def best_laps(results, meta):
     rows = []
@@ -65,19 +37,13 @@ def best_laps(results, meta):
     df["gap"] = df["best"] - df["best"].min()
     return df.sort_values("position", na_position="last").reset_index(drop=True)
 
-
 def long_run_frame(laps, stints, meta):
-    """Laps belonging to a run of at least MIN_RUN_LAPS on one tyre.
-
-    Pit-out laps are dropped, then anything outside the threshold, which strips
-    aborted laps, traffic and in-laps without needing fuel-load data.
-    """
     if laps.empty:
         return pd.DataFrame()
 
     df = laps.dropna(subset=["seconds"]).copy()
     if "is_pit_out_lap" in df.columns:
-        df = df[df["is_pit_out_lap"] != True]  # noqa: E712 (may be object dtype)
+        df = df[df["is_pit_out_lap"] != True]  
     if df.empty:
         return pd.DataFrame()
 
@@ -104,7 +70,6 @@ def long_run_frame(laps, stints, meta):
     out["code"] = out["driver_number"].map(
         lambda n: meta[int(n)]["code"] if int(n) in meta else str(n))
     return out
-
 
 def chart_timesheet(df, title):
     def draw(path):
@@ -152,7 +117,7 @@ def chart_long_runs(runs, meta, title, n=10):
         c.style_axes(ax)
         try:
             bp = ax.boxplot(data, tick_labels=labels, patch_artist=True, showfliers=False)
-        except TypeError:  # matplotlib < 3.9
+        except TypeError: 
             bp = ax.boxplot(data, labels=labels, patch_artist=True, showfliers=False)
         for patch, color in zip(bp["boxes"], colors):
             patch.set_facecolor(color)
@@ -213,7 +178,6 @@ def build_caption(blocks, meeting, long_run_session):
     lines.append("")
     return "\n".join(lines)
 
-
 def main():
     parser = argparse.ArgumentParser()
     c.add_common_args(parser, "Practice")
@@ -261,8 +225,6 @@ def main():
     where = meeting.get("country_name") or ""
     year = meeting.get("year", "")
 
-    # the long-run chart comes from whichever session actually ran long runs,
-    # which is normally the last one of the day
     with_runs = [b for b in blocks if not b["runs"].empty]
     long_run_session = max(with_runs, key=lambda b: len(b["runs"])) if with_runs else None
 
