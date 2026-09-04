@@ -2,7 +2,6 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
